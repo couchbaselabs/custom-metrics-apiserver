@@ -60,7 +60,10 @@ type AdapterBase struct {
 	// DiscoveryInterval specifies the interval at which to recheck discovery
 	// information for the discovery RESTMapper.  It's set from a flag.
 	DiscoveryInterval time.Duration
-
+	// Namespace metric is running
+	Namespace string
+	// couchbaseClusterName name of couchbase cluster to select for metrics
+	CouchbaseClusterName string
 	// FlagSet is the flagset to add flags to.
 	// It defaults to the normal CommandLine flags
 	// if not explicitly set.
@@ -100,6 +103,8 @@ func (b *AdapterBase) InstallFlags() {
 				"any described objects")
 		b.FlagSet.DurationVar(&b.DiscoveryInterval, "discovery-interval", b.DiscoveryInterval,
 			"interval at which to refresh API discovery information")
+		b.FlagSet.StringVar(&b.Namespace, "namespace", "default", "namespace providing custom metrics")
+		b.FlagSet.StringVar(&b.CouchbaseClusterName, "cluster", "cb-example", "name of couchbase cluster")
 	})
 }
 

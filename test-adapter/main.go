@@ -28,6 +28,7 @@ import (
 
 	basecmd "github.com/kubernetes-incubator/custom-metrics-apiserver/pkg/cmd"
 	"github.com/kubernetes-incubator/custom-metrics-apiserver/pkg/provider"
+	"github.com/kubernetes-incubator/custom-metrics-apiserver/test-adapter/exporter"
 	fakeprov "github.com/kubernetes-incubator/custom-metrics-apiserver/test-adapter/provider"
 )
 
@@ -49,7 +50,7 @@ func (a *SampleAdapter) makeProviderOrDie() (provider.MetricsProvider, *restful.
 		klog.Fatalf("unable to construct discovery REST mapper: %v", err)
 	}
 
-	return fakeprov.NewFakeProvider(client, mapper)
+	return fakeprov.NewFakeProvider(client, mapper, a.Namespace, a.CouchbaseClusterName)
 }
 
 func main() {
@@ -65,14 +66,28 @@ func main() {
 	cmd.WithCustomMetrics(testProvider)
 	cmd.WithExternalMetrics(testProvider)
 
+	klog.Infof("WHOODIE WHOOO! %s", cmd.Namespace)
+
 	klog.Infof(cmd.Message)
 	// Set up POST endpoint for writing fake metric values
 	restful.DefaultContainer.Add(webService)
+
 	go func() {
 		// Open port for POSTing fake metrics
 		klog.Fatal(http.ListenAndServe(":8080", nil))
 	}()
+	go func() {
+		// Start fake exporter
+		exp := exporter.FakeExporter{}
+		exp.Update()
+	}()
+
 	if err := cmd.Run(wait.NeverStop); err != nil {
 		klog.Fatalf("unable to run custom metrics adapter: %v", err)
 	}
+
+	// Start Pod watcher
+	// 1. Grab kubeclient
+	// 2. Watch for couchbase Pods
+	// 3. Create different stats
 }

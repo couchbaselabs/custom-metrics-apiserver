@@ -17,6 +17,7 @@ limitations under the License.
 package provider
 
 import (
+	"context"
 	"net/http"
 	"sync"
 	"time"
@@ -32,6 +33,8 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/metrics/pkg/apis/custom_metrics"
 	"k8s.io/metrics/pkg/apis/external_metrics"
 
@@ -106,18 +109,24 @@ type testingProvider struct {
 	client dynamic.Interface
 	mapper apimeta.RESTMapper
 
-	valuesLock      sync.RWMutex
-	values          map[CustomMetricResource]metricValue
-	externalMetrics []externalMetric
+	valuesLock           sync.RWMutex
+	values               map[CustomMetricResource]metricValue
+	externalMetrics      []externalMetric
+	namespace            string
+	couchbaseClusterName string
+	pods                 map[string]bool
 }
 
 // NewFakeProvider returns an instance of testingProvider, along with its restful.WebService that opens endpoints to post new fake metrics
-func NewFakeProvider(client dynamic.Interface, mapper apimeta.RESTMapper) (provider.MetricsProvider, *restful.WebService) {
+func NewFakeProvider(client dynamic.Interface, mapper apimeta.RESTMapper, namespace string, couchbaseClusterName string) (provider.MetricsProvider, *restful.WebService) {
 	provider := &testingProvider{
-		client:          client,
-		mapper:          mapper,
-		values:          make(map[CustomMetricResource]metricValue),
-		externalMetrics: testingExternalMetrics,
+		client:               client,
+		mapper:               mapper,
+		values:               make(map[CustomMetricResource]metricValue),
+		externalMetrics:      testingExternalMetrics,
+		namespace:            namespace,
+		couchbaseClusterName: couchbaseClusterName,
+		pods:                 make(map[string]bool),
 	}
 	return provider, provider.webService()
 }
@@ -166,17 +175,11 @@ func (p *testingProvider) updateMetric(request *restful.Request, response *restf
 		return
 	}
 
-	groupResource := schema.ParseGroupResource(resourceType)
+	p.updateMetricWithParams(namespaced, namespace, resourceType, name, metricName, value)
+}
 
-	metricLabels := labels.Set{}
-	sel := request.QueryParameter("labels")
-	if len(sel) > 0 {
-		metricLabels, err = labels.ConvertSelectorToLabelsMap(sel)
-		if err != nil {
-			response.WriteErrorString(http.StatusBadRequest, err.Error())
-			return
-		}
-	}
+func (p *testingProvider) updateMetricWithParams(namespaced bool, namespace string, resourceType string, name string, metricName string, value *resource.Quantity) {
+	groupResource := schema.ParseGroupResource(resourceType)
 
 	info := provider.CustomMetricInfo{
 		GroupResource: groupResource,
@@ -184,7 +187,7 @@ func (p *testingProvider) updateMetric(request *restful.Request, response *restf
 		Namespaced:    namespaced,
 	}
 
-	info, _, err = info.Normalized(p.mapper)
+	info, _, err := info.Normalized(p.mapper)
 	if err != nil {
 		klog.Errorf("Error normalizing info: %s", err)
 	}
@@ -198,7 +201,7 @@ func (p *testingProvider) updateMetric(request *restful.Request, response *restf
 		NamespacedName:   namespacedName,
 	}
 	p.values[metricInfo] = metricValue{
-		labels: metricLabels,
+		labels: labels.Set{},
 		value:  *value,
 	}
 }
@@ -317,7 +320,41 @@ func (p *testingProvider) ListAllMetrics() []provider.CustomMetricInfo {
 		metrics = append(metrics, info)
 	}
 
+	// Fetch from k8s
+	p.listTestMetrics()
 	return metrics
+}
+
+func (p *testingProvider) listTestMetrics() {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		panic(err.Error())
+	}
+	client := kubernetes.NewForConfigOrDie(config)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	selector := "app=couchbase,couchbase_cluster=" + p.couchbaseClusterName
+	pods, err := client.CoreV1().Pods(p.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return
+	}
+
+	existingPods := make(map[string]bool)
+	for _, pod := range pods.Items {
+		// add pod metrics if non-existent
+		if _, ok := p.pods[pod.Name]; !ok {
+			klog.Infof("Adding: %s", pod.Name)
+			value := resource.NewQuantity(0, resource.DecimalSI)
+			p.updateMetricWithParams(true, p.namespace, "pods", pod.Name, "test-metric", value)
+		}
+		// record existing pod
+		existingPods[pod.Name] = true
+	}
+
+	// set acutal pods to existing pods
+	p.pods = existingPods
+
 }
 
 func (p *testingProvider) GetExternalMetric(namespace string, metricSelector labels.Selector, info provider.ExternalMetricInfo) (*external_metrics.ExternalMetricValueList, error) {
