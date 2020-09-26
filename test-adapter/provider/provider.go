@@ -18,6 +18,7 @@ package provider
 
 import (
 	"context"
+	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -104,6 +105,27 @@ type metricValue struct {
 	value  resource.Quantity
 }
 
+type metricPolicyType string
+
+const (
+	metricPolicyTypeIncrement metricPolicyType = "increment"
+	metricPolicyTypeDecrement metricPolicyType = "decrement"
+	metricPolicyTypeAverage   metricPolicyType = "average"
+	metricPolicyTypeRandom    metricPolicyType = "random"
+)
+
+func (m metricPolicyType) Name() string {
+	return "test-metric-" + string(m)
+}
+
+type metricPolicy struct {
+	Active       bool
+	InitialValue int64
+	TargetValue  int64
+	MetricName   string
+	Policy       metricPolicyType
+}
+
 // testingProvider is a sample implementation of provider.MetricsProvider which stores a map of fake metrics
 type testingProvider struct {
 	client dynamic.Interface
@@ -114,7 +136,7 @@ type testingProvider struct {
 	externalMetrics      []externalMetric
 	namespace            string
 	couchbaseClusterName string
-	pods                 map[string]bool
+	podMetricPolicies    map[string][]metricPolicy
 }
 
 // NewFakeProvider returns an instance of testingProvider, along with its restful.WebService that opens endpoints to post new fake metrics
@@ -126,8 +148,12 @@ func NewFakeProvider(client dynamic.Interface, mapper apimeta.RESTMapper, namesp
 		externalMetrics:      testingExternalMetrics,
 		namespace:            namespace,
 		couchbaseClusterName: couchbaseClusterName,
-		pods:                 make(map[string]bool),
+		podMetricPolicies:    make(map[string][]metricPolicy),
 	}
+
+	go func() {
+		provider.updatePodMetrics()
+	}()
 	return provider, provider.webService()
 }
 
@@ -175,10 +201,10 @@ func (p *testingProvider) updateMetric(request *restful.Request, response *restf
 		return
 	}
 
-	p.updateMetricWithParams(namespaced, namespace, resourceType, name, metricName, value)
+	p.updateMetricWithParams(namespaced, namespace, resourceType, name, metricName, *value)
 }
 
-func (p *testingProvider) updateMetricWithParams(namespaced bool, namespace string, resourceType string, name string, metricName string, value *resource.Quantity) {
+func (p *testingProvider) updateMetricWithParams(namespaced bool, namespace string, resourceType string, name string, metricName string, value resource.Quantity) {
 	groupResource := schema.ParseGroupResource(resourceType)
 
 	info := provider.CustomMetricInfo{
@@ -202,7 +228,7 @@ func (p *testingProvider) updateMetricWithParams(namespaced bool, namespace stri
 	}
 	p.values[metricInfo] = metricValue{
 		labels: labels.Set{},
-		value:  *value,
+		value:  value,
 	}
 }
 
@@ -314,47 +340,142 @@ func (p *testingProvider) ListAllMetrics() []provider.CustomMetricInfo {
 		infos[resource.CustomMetricInfo] = struct{}{}
 	}
 
-	// Build slice of CustomMetricInfos to be returns
+	// Build slice of CustomMetricInfos to be returned
 	metrics := make([]provider.CustomMetricInfo, 0, len(infos))
 	for info := range infos {
 		metrics = append(metrics, info)
 	}
 
-	// Fetch from k8s
-	p.listTestMetrics()
 	return metrics
 }
 
-func (p *testingProvider) listTestMetrics() {
+func (p *testingProvider) updatePodMetrics() {
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		panic(err.Error())
 	}
 	client := kubernetes.NewForConfigOrDie(config)
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
 	selector := "app=couchbase,couchbase_cluster=" + p.couchbaseClusterName
-	pods, err := client.CoreV1().Pods(p.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
-	if err != nil {
-		return
-	}
 
-	existingPods := make(map[string]bool)
-	for _, pod := range pods.Items {
-		// add pod metrics if non-existent
-		if _, ok := p.pods[pod.Name]; !ok {
-			klog.Infof("Adding: %s", pod.Name)
-			value := resource.NewQuantity(0, resource.DecimalSI)
-			p.updateMetricWithParams(true, p.namespace, "pods", pod.Name, "test-metric", value)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		// get pods
+		pods, err := client.CoreV1().Pods(p.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+		if err != nil {
+			klog.Errorf("Failed to list pods: %v", pods)
+			continue
 		}
-		// record existing pod
-		existingPods[pod.Name] = true
+
+		existingMetricPolicies := make(map[string][]metricPolicy)
+		for podIndex, pod := range pods.Items {
+			if policies, ok := p.podMetricPolicies[pod.Name]; ok {
+				// get current value for each metric
+				for _, policy := range policies {
+					groupResource := schema.ParseGroupResource("pods")
+					info := provider.CustomMetricInfo{
+						GroupResource: groupResource,
+						Metric:        policy.MetricName,
+						Namespaced:    true,
+					}
+					namespacedName := types.NamespacedName{Name: pod.Name, Namespace: p.namespace}
+					selectorSet := make(labels.Set)
+					value, err := p.valueFor(info, namespacedName, selectorSet.AsSelector())
+					if err != nil {
+						klog.Errorf("Error getting metric value: %v", err)
+						continue
+					}
+
+					switch policy.Policy {
+					case metricPolicyTypeIncrement:
+						// increment by 10 until value is gt/eq target value
+						if value.CmpInt64(policy.TargetValue) == -1 {
+							value.Add(*resource.NewQuantity(10, resource.DecimalSI))
+						}
+					case metricPolicyTypeDecrement:
+						// subtract by 10 until value is lt/eq target value
+						if value.CmpInt64(policy.TargetValue) == 1 {
+							value.Sub(*resource.NewQuantity(10, resource.DecimalSI))
+						}
+					case metricPolicyTypeAverage:
+						// average creates values with enough distribution that
+						// should require scale to resolve
+						randi := rand.Int63n(100)
+						if podIndex%2 == 0 {
+							// set value to lower end of average
+							value = *resource.NewQuantity(randi, resource.DecimalSI)
+						} else {
+							// set every other pod to upper end of average
+							klog.Infof("SET JAWN FRM: %d", randi)
+							value = *resource.NewQuantity(policy.TargetValue-randi, resource.DecimalSI)
+						}
+					case metricPolicyTypeRandom:
+						value = *resource.NewQuantity(rand.Int63n(policy.TargetValue), resource.DecimalSI)
+					}
+					p.updateMetricWithParams(true, p.namespace, "pods", pod.Name, policy.MetricName, value)
+				}
+				// update existing policy
+				existingMetricPolicies[pod.Name] = policies
+			} else {
+				// add new pod metrics
+				klog.Infof("Adding: %s", pod.Name)
+				policies := newPodMetricPolicies()
+				for _, policy := range policies {
+					var value resource.Quantity
+					switch policy.Policy {
+					case metricPolicyTypeIncrement, metricPolicyTypeDecrement:
+						value = *resource.NewQuantity(policy.InitialValue, resource.DecimalSI)
+					case metricPolicyTypeAverage:
+						// average metric starts with either initial or target value
+						value = *resource.NewQuantity(policy.InitialValue, resource.DecimalSI)
+					case metricPolicyTypeRandom:
+						value = *resource.NewQuantity(rand.Int63n(policy.TargetValue), resource.DecimalSI)
+					}
+					p.updateMetricWithParams(true, p.namespace, "pods", pod.Name, policy.MetricName, value)
+				}
+				existingMetricPolicies[pod.Name] = policies
+			}
+		}
+
+		// set acutal pods to existing pods
+		p.podMetricPolicies = existingMetricPolicies
+
+		// delay
+		time.Sleep(5 * time.Second)
 	}
+}
 
-	// set acutal pods to existing pods
-	p.pods = existingPods
-
+func newPodMetricPolicies() []metricPolicy {
+	return []metricPolicy{
+		metricPolicy{
+			Active:       true,
+			InitialValue: 0,
+			TargetValue:  100,
+			MetricName:   metricPolicyTypeIncrement.Name(),
+			Policy:       metricPolicyTypeIncrement,
+		},
+		metricPolicy{
+			Active:       true,
+			InitialValue: 100,
+			TargetValue:  0,
+			MetricName:   metricPolicyTypeDecrement.Name(),
+			Policy:       metricPolicyTypeDecrement,
+		},
+		metricPolicy{
+			Active:       true,
+			InitialValue: 0,
+			TargetValue:  400,
+			MetricName:   metricPolicyTypeAverage.Name(),
+			Policy:       metricPolicyTypeAverage,
+		},
+		metricPolicy{
+			Active:      true,
+			TargetValue: 1000,
+			MetricName:  metricPolicyTypeRandom.Name(),
+			Policy:      metricPolicyTypeRandom,
+		},
+	}
 }
 
 func (p *testingProvider) GetExternalMetric(namespace string, metricSelector labels.Selector, info provider.ExternalMetricInfo) (*external_metrics.ExternalMetricValueList, error) {
