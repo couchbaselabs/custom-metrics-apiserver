@@ -389,8 +389,10 @@ func (p *testingProvider) updatePodMetrics() {
 
 					switch policy.Policy {
 					case metricPolicyTypeIncrement:
+						// more pods should reduce target values
+						targetValue := policy.TargetValue - int64(podIndex*10)
 						// increment by 10 until value is gt/eq target value
-						if value.CmpInt64(policy.TargetValue) == -1 {
+						if value.CmpInt64(targetValue) == -1 {
 							value.Add(*resource.NewQuantity(10, resource.DecimalSI))
 						}
 					case metricPolicyTypeDecrement:
@@ -407,7 +409,6 @@ func (p *testingProvider) updatePodMetrics() {
 							value = *resource.NewQuantity(randi, resource.DecimalSI)
 						} else {
 							// set every other pod to upper end of average
-							klog.Infof("SET JAWN FRM: %d", randi)
 							value = *resource.NewQuantity(policy.TargetValue-randi, resource.DecimalSI)
 						}
 					case metricPolicyTypeRandom:
@@ -419,7 +420,7 @@ func (p *testingProvider) updatePodMetrics() {
 				existingMetricPolicies[pod.Name] = policies
 			} else {
 				// add new pod metrics
-				klog.Infof("Adding: %s", pod.Name)
+				klog.Infof("Adding metrics for: %s", pod.Name)
 				policies := newPodMetricPolicies()
 				for _, policy := range policies {
 					var value resource.Quantity
@@ -442,7 +443,7 @@ func (p *testingProvider) updatePodMetrics() {
 		p.podMetricPolicies = existingMetricPolicies
 
 		// delay
-		time.Sleep(5 * time.Second)
+		time.Sleep(2 * time.Second)
 	}
 }
 
@@ -458,7 +459,7 @@ func newPodMetricPolicies() []metricPolicy {
 		metricPolicy{
 			Active:       true,
 			InitialValue: 100,
-			TargetValue:  0,
+			TargetValue:  10,
 			MetricName:   metricPolicyTypeDecrement.Name(),
 			Policy:       metricPolicyTypeDecrement,
 		},

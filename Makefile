@@ -1,4 +1,4 @@
-REGISTRY?=kubernetes-incubator
+REGISTRY?=tahmmee
 IMAGE?=k8s-test-metrics-adapter
 TEMP_DIR:=$(shell mktemp -d)
 ARCH?=amd64

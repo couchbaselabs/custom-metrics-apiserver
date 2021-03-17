@@ -2,7 +2,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: custom-metrics:system:auth-delegator
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
@@ -10,7 +10,7 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 
 ---
 apiVersion: apps/v1
@@ -19,7 +19,7 @@ metadata:
   labels:
     app: custom-metrics-apiserver
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 spec:
   replicas: 1
   selector:
@@ -41,8 +41,8 @@ spec:
         - --secure-port=6443
         - --logtostderr=true
         - --v=10
-        - --namespace=test-d9fz4
-        - --cluster=test-couchbase-k8459
+        - --namespace=test-gz4kg
+        - --cluster=test-couchbase-8b8qc
         ports:
         - containerPort: 6443
           name: https
@@ -59,7 +59,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: custom-metrics-resource-reader
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
@@ -67,19 +67,19 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 ---
 kind: ServiceAccount
 apiVersion: v1
 metadata:
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 spec:
   ports:
   - name: https
@@ -95,11 +95,11 @@ apiVersion: apiregistration.k8s.io/v1beta1
 kind: APIService
 metadata:
   name: v1beta2.custom.metrics.k8s.io
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 spec:
   service:
     name: custom-metrics-apiserver
-    namespace: test-d9fz4
+    namespace: test-gz4kg
   group: custom.metrics.k8s.io
   version: v1beta2
   insecureSkipTLSVerify: true
@@ -110,7 +110,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: custom-metrics-resource-reader
-  namespace: test-d9fz4
+  namespace: test-gz4kg
 rules:
 - apiGroups:
   - ""
@@ -134,4 +134,4 @@ roleRef:
 subjects:
 - kind: ServiceAccount
   name: custom-metrics-apiserver
-  namespace: test-d9fz4
+  namespace: test-gz4kg
